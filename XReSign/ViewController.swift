@@ -21,10 +21,13 @@ class ViewController: NSViewController {
     @IBOutlet var buttonChangeBundleId: NSButton!
     @IBOutlet var buttonResign: NSButton!
     @IBOutlet var progressIndicator: NSProgressIndicator!
-
+    @IBOutlet var textViewLog: NSTextView!
+    
     fileprivate var certificates: [String] = []
     fileprivate var keychains: [String: String] = [:]
     fileprivate var tempDir: String?
+    private var progressObserver: NSObjectProtocol!
+    private var terminateObserver: NSObjectProtocol!
 
     // MARK: - Main
 
@@ -36,12 +39,55 @@ class ViewController: NSViewController {
         if let defaultEntitlements = UserDefaults.standard.string(forKey: kEntitlementsPathKey) {
             textFieldEntitlementsPath.stringValue = defaultEntitlements
         }
+        
+        apppendLog(message: """
+            XReSign allows you to (re)sign unencrypted ipa-file with certificate for which you hold the corresponding private key.
+
+            1. Drag or browse .ipa file to the top box.
+            2. Drag or browse provisioning profile to the second box. (Optional)
+            3. Drag or browse entitlements plist to the third box. (Optional)
+            4. In the next box your can change the app bundle identifier. (Optional)
+            5. Select signing certificate from Keychain Access in the bottom box.
+            6. Click ReSign! The resigned file will be saved in the same folder as the original file.
+
+            NOTE: Pay attention to the right pair between signing certificate and provisioning profile.
+            """)
+        
         loadKeychains()
     }
 
     override var representedObject: Any? {
         didSet {
             // Update the view, if already loaded.
+        }
+    }
+    
+    private func clearLog() {
+        DispatchQueue.main.async {
+            self.textViewLog.string = ""
+        }
+    }
+    
+    private func apppendLog(message: String) {
+        if message.count == 0 {
+            return
+        }
+        
+        DispatchQueue.main.async {
+            var text: String
+            if self.textViewLog.string.isEmpty {
+                text = message
+            } else {
+                text = self.textViewLog.string.appending("\n")
+                if let ch = message.last, ch.isNewline {
+                    text.append(String(message.dropLast()))
+                } else {
+                    text.append(message)
+                }
+            }
+
+            self.textViewLog.string = text
+            self.textViewLog.scrollRangeToVisible(NSMakeRange(text.count, 0))
         }
     }
 
@@ -206,44 +252,48 @@ class ViewController: NSViewController {
             showAlertWith(title: nil, message: "Can not find resign script to run", style: .critical)
             return
         }
+        
+        clearLog()
 
         buttonResign.isEnabled = false
         progressIndicator.isHidden = false
         progressIndicator.startAnimation(nil)
 
-        DispatchQueue.global().async {
-            let task: Process = Process()
-            let pipe: Pipe = Pipe()
+        let task: Process = Process()
+        let pipe: Pipe = Pipe()
 
-            task.launchPath = "/bin/sh"
-            task.arguments = [launchPath, "-s", ipaPath, "-c", developer, "-p", provisioning, "-b", bundle ?? "", "-e", entitlementsPath ?? ""]
-            task.standardOutput = pipe
-            task.standardError = pipe
+        task.launchPath = "/bin/sh"
+        task.arguments = [launchPath, "-s", ipaPath, "-c", developer, "-p", provisioning, "-b", bundle ?? "", "-e", entitlementsPath ?? ""]
+        task.standardOutput = pipe
+        task.standardError = pipe
 
-            let handle = pipe.fileHandleForReading
-            task.launch()
-
-            let data = handle.readDataToEndOfFile()
-            let buffer = String(data: data, encoding: String.Encoding.utf8)!
-            print("\(buffer)")
-
-            var success = false
-            if let _ = buffer.range(of: "XReSign FINISHED") {
-                success = true
+        let handle = pipe.fileHandleForReading
+        handle.waitForDataInBackgroundAndNotify()
+    
+        progressObserver = NotificationCenter.default.addObserver(forName: NSNotification.Name.NSFileHandleDataAvailable,
+                                                                  object: handle, queue: nil) {  notification -> Void in
+            let data = handle.availableData
+            if data.count > 0 {
+                if let message = NSString(data: data, encoding: String.Encoding.utf8.rawValue) {
+                    self.apppendLog(message: message as String)
+                }
+                handle.waitForDataInBackgroundAndNotify()
+            } else {
+                NotificationCenter.default.removeObserver(self.progressObserver!)
             }
+        }
 
+        terminateObserver = NotificationCenter.default.addObserver(forName: Process.didTerminateNotification,
+                                                                   object: task, queue: nil) { notification -> Void in
+            NotificationCenter.default.removeObserver(self.terminateObserver!)
             DispatchQueue.main.async {
                 self.buttonResign.isEnabled = true
                 self.progressIndicator.stopAnimation(nil)
                 self.progressIndicator.isHidden = true
-
-                if success {
-                    self.showAlertWith(title: nil, message: "Re-sign finished", style: .informational)
-                } else {
-                    self.showAlertWith(title: nil, message: "Failed to re-sign the app", style: .critical)
-                }
             }
         }
+
+        task.launch()
     }
 
     // MARK: - Actions
