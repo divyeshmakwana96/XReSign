@@ -44,7 +44,7 @@ do
 done
 
 
-echo "Start resign the app..."
+echo "Start (re)sign the app..."
 
 OUTDIR=$(dirname "${SOURCEIPA}")
 TMPDIR="$OUTDIR/tmp"
@@ -55,50 +55,65 @@ mkdir -p "$APPDIR"
 unzip -qo "$SOURCEIPA" -d "$APPDIR"
 
 APPLICATION=$(ls "$APPDIR/Payload/")
+APP_PATH="$APPDIR/Payload/$APPLICATION"
 
 
 if [ -z "${MOBILEPROV}" ]; then
     echo "Sign process using existing provisioning profile from payload"
 else
     echo "Coping provisioning profile into application payload"
-    cp "$MOBILEPROV" "$APPDIR/Payload/$APPLICATION/embedded.mobileprovision"
+    cp "$MOBILEPROV" "$APP_PATH/embedded.mobileprovision"
 fi
 
-echo "Extract entitlements from mobileprovisioning"
+echo "Extract entitlements from mobileprovision"
 if [ -z "${ENTITLEMENTS}" ]; then
-    security cms -D -i "$APPDIR/Payload/$APPLICATION/embedded.mobileprovision" > "$TMPDIR/provisioning.plist"
-  /usr/libexec/PlistBuddy -x -c 'Print:Entitlements' "$TMPDIR/provisioning.plist" > "$TMPDIR/entitlements.plist"
+    security cms -D -i "$APP_PATH/embedded.mobileprovision" > "$TMPDIR/provisioning.plist"
+    /usr/libexec/PlistBuddy -x -c 'Print:Entitlements' "$TMPDIR/provisioning.plist" > "$TMPDIR/entitlements.plist"
 else
     cp ${ENTITLEMENTS} "$TMPDIR/entitlements.plist"
     echo "${ENTITLEMENTS}"
 fi
 
 if [ -z "${BUNDLEID}" ]; then
-    echo "Sign process using existing bundle identifier from payload"
+    echo "Sign using existing bundle identifier from payload"
 else
-    echo "Changing BundleID with : $BUNDLEID"
-    /usr/libexec/PlistBuddy -c "Set:CFBundleIdentifier $BUNDLEID" "$APPDIR/Payload/$APPLICATION/Info.plist"
+    echo "Changing bundle identifier with: $BUNDLEID"
+    /usr/libexec/PlistBuddy -c "Set:CFBundleIdentifier $BUNDLEID" "$APP_PATH/Info.plist"
 fi
 
 
-echo "Get list of components and resign with certificate: $DEVELOPER"
-find -d "$APPDIR" \( -name "*.app" -o -name "*.appex" -o -name "*.framework" -o -name "*.dylib" \) > "$TMPDIR/components.txt"
+echo "Get list of components and sign with certificate: $DEVELOPER"
+find -d "$APP_PATH" \( -name "*.app" -o -name "*.appex" -o -name "*.framework" -o -name "*.dylib" \) > "$TMPDIR/components.txt"
 
+echo "Sign plugins, frameworks, dylibs"
 var=$((0))
 while IFS='' read -r line || [[ -n "$line" ]]; do
-	if [[ ! -z "${BUNDLEID}" ]] && [[ "$line" == *".appex"* ]]; then
-	   echo "Changing .appex BundleID with : $BUNDLEID.extra$var"
-	   /usr/libexec/PlistBuddy -c "Set:CFBundleIdentifier $BUNDLEID.extra$var" "$line/Info.plist"
-	   var=$((var+1))
-	fi    
-    /usr/bin/codesign --continue -f -s "$DEVELOPER" --entitlements "$TMPDIR/entitlements.plist" "$line"
+    if [[ "$line" == *".appex" ]]; then
+        if [[ ! -z "${BUNDLEID}" ]]; then
+            echo "Changing .appex bundle identifier with: $BUNDLEID.extra$var"
+            /usr/libexec/PlistBuddy -c "Set:CFBundleIdentifier $BUNDLEID.extra$var" "$line/Info.plist"
+            var=$((var+1))
+        fi
+        /usr/bin/codesign --continue -f -s "$DEVELOPER" --entitlements "$TMPDIR/entitlements.plist" "$line"
+    elif [[ "$line" == *".framework" ]]; then
+        /usr/bin/codesign --continue -f -s "$DEVELOPER" --entitlements "$TMPDIR/entitlements.plist" "$line"
+    elif [[ "$line" == *".dylib" ]]; then
+        /usr/bin/codesign --continue -f -s "$DEVELOPER" --entitlements "$TMPDIR/entitlements.plist" "$line"
+    fi
+done < "$TMPDIR/components.txt"
+
+echo "Sign app"
+while IFS='' read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" == *".app" ]]; then
+       /usr/bin/codesign --continue -f -s "$DEVELOPER" --entitlements "$TMPDIR/entitlements.plist" "$line"
+    fi
 done < "$TMPDIR/components.txt"
 
 
-echo "Creating the signed ipa"
 cd "$APPDIR"
 filename=$(basename "$APPLICATION")
 filename="${filename%.*}-xresign.ipa"
+echo "Creating the signed ipa: ${filename}"
 zip -qr "../$filename" *
 cd ..
 mv "$filename" "$OUTDIR"
